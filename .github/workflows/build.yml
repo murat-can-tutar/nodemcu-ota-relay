@@ -27,8 +27,9 @@ jobs:
     - name: Compile
       run: |
         arduino-cli compile \
-          --fqbn esp8266:esp8266:nodemcuv2 \
-          .
+  --fqbn esp8266:esp8266:nodemcuv2 \
+  --output-dir build \
+  .
 
     - name: Upload BIN
       uses: actions/upload-artifact@v4
