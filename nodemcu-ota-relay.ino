@@ -1,40 +1,52 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266HTTPUpdateServer.h>
+#include <ArduinoOTA.h>
 
-const char* ssid = "NodeMCU_OTA";
+const char* ssid = "NodeMCU-OTA";
 const char* password = "12345678";
 
 ESP8266WebServer server(80);
-ESP8266HTTPUpdateServer ota;
 
 bool relayState = false;
 
-String page() {
-  String s = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
-  s += "<style>button{width:150px;height:60px;font-size:20px;}</style></head><body>";
-  s += "<h2>NodeMCU Röle Kontrol</h2>";
-  s += "<p>Durum: ";
-  s += relayState ? "ACIK" : "KAPALI";
-  s += "</p>";
-  s += "<a href='/toggle'><button>AC / KAPA</button></a>";
-  s += "<br><br><a href='/update'>OTA</a>";
-  s += "</body></html>";
-  return s;
+void handleRoot() {
+  String page =
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
+    "<style>body{font-family:Arial;text-align:center;}button{font-size:24px;padding:20px;}</style>"
+    "</head><body>"
+    "<h2>Röle Kontrol</h2>"
+    "<p>Durum: " + String(relayState ? "ACIK" : "KAPALI") + "</p>"
+    "<a href='/toggle'><button>AC / KAPA</button></a>"
+    "</body></html>";
+  server.send(200, "text/html", page);
+}
+
+void handleToggle() {
+  relayState = !relayState;
+  digitalWrite(D1, relayState ? LOW : HIGH);
+  server.sendHeader("Location", "/");
+  server.send(303);
 }
 
 void setup() {
   pinMode(D1, OUTPUT);
-  digitalWrite(D1, LOW);
+  digitalWrite(D1, HIGH);
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password);
 
-  server.on("/", []() {
-    server.send(200, "text/html", page());
-  });
+  ArduinoOTA.setHostname("nodemcu-ota");
+  ArduinoOTA.begin();
 
-  server.on("/toggle", []() {
+  server.on("/", handleRoot);
+  server.on("/toggle", handleToggle);
+  server.begin();
+}
+
+void loop() {
+  ArduinoOTA.handle();
+  server.handleClient();
+}  server.on("/toggle", []() {
     relayState = !relayState;
     digitalWrite(D1, relayState ? HIGH : LOW);
     server.sendHeader("Location", "/");
