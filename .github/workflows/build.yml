@@ -1,0 +1,37 @@
+name: Build NodeMCU BIN
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Arduino CLI
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+        sudo mv bin/arduino-cli /usr/local/bin/
+
+    - name: Setup ESP8266 core
+      run: |
+        arduino-cli config init
+        arduino-cli config set board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+        arduino-cli core update-index
+        arduino-cli core install esp8266:esp8266
+
+    - name: Compile
+      run: |
+        arduino-cli compile \
+          --fqbn esp8266:esp8266:nodemcuv2 \
+          nodemcu-ota-relay
+
+    - name: Upload BIN
+      uses: actions/upload-artifact@v4
+      with:
+        name: nodemcu-bin
+        path: nodemcu-ota-relay/build/esp8266.esp8266.nodemcuv2/*.bin
