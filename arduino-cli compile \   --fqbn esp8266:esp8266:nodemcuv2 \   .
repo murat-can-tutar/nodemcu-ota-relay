@@ -28,10 +28,10 @@ jobs:
       run: |
         arduino-cli compile \
           --fqbn esp8266:esp8266:nodemcuv2 \
-          nodemcu-ota-relay
+          .
 
     - name: Upload BIN
       uses: actions/upload-artifact@v4
       with:
         name: nodemcu-bin
-        path: nodemcu-ota-relay/build/esp8266.esp8266.nodemcuv2/*.bin
+        path: build/esp8266.esp8266.nodemcuv2/*.bin
