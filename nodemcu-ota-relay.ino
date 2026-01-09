@@ -1,5 +1,7 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 
 const char* ssid = "NodeMCU-OTA";
@@ -45,19 +47,5 @@ void setup() {
 
 void loop() {
   ArduinoOTA.handle();
-  server.handleClient();
-}  server.on("/toggle", []() {
-    relayState = !relayState;
-    digitalWrite(D1, relayState ? HIGH : LOW);
-    server.sendHeader("Location", "/");
-    server.send(303);
-  });
-
-  ota.setup(&server);
-
-  server.begin();
-}
-
-void loop() {
   server.handleClient();
 }
