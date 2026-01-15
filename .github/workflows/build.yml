@@ -31,10 +31,10 @@ jobs:
           arduino-cli compile \
             --fqbn esp8266:esp8266:nodemcuv2:CpuFrequency=80,FlashSize=4M1M,LwIPVariant=v2lower,SSL=basic \
             --output-dir build \
-            ./NodeMCU_Role.ino
+            ./nodemcu-ota-relay.ino
 
       - name: Upload BIN
         uses: actions/upload-artifact@v4
         with:
           name: nodemcu-bin
-          path: build/*.bin
+          path: build/*.bin 
