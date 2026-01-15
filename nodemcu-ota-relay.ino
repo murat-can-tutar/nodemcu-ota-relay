@@ -1,51 +1,72 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
-#include <WiFiUdp.h>
-#include <ArduinoOTA.h>
+#include <ESP8266HTTPUpdateServer.h>
 
-const char* ssid = "NodeMCU-OTA";
-const char* password = "12345678";
+const char* ap_ssid = "NodeMCU_Role";
+const char* ap_pass = "12345678";
+
+#define RELAY_PIN D1
 
 ESP8266WebServer server(80);
+ESP8266HTTPUpdateServer httpUpdater;
 
 bool relayState = false;
 
-void handleRoot() {
-  String page =
-    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
-    "<style>body{font-family:Arial;text-align:center;}button{font-size:24px;padding:20px;}</style>"
-    "</head><body>"
-    "<h2>Röle Kontrol</h2>"
-    "<p>Durum: " + String(relayState ? "ACIK" : "KAPALI") + "</p>"
-    "<a href='/toggle'><button>AC / KAPA</button></a>"
-    "</body></html>";
-  server.send(200, "text/html", page);
-}
+String webpage() {
+  String page = "<!DOCTYPE html><html><head>";
+  page += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  page += "<title>NodeMCU Röle</title>";
+  page += "<style>";
+  page += "body{font-family:Arial;text-align:center;background:#111;color:#fff;}";
+  page += "button{padding:20px;font-size:20px;border:none;border-radius:10px;margin:10px;}";
+  page += ".on{background:#2ecc71;color:#000;}";
+  page += ".off{background:#e74c3c;color:#000;}";
+  page += "</style></head><body>";
+  page += "<h2>NodeMCU Röle Kontrol</h2>";
 
-void handleToggle() {
-  relayState = !relayState;
-  digitalWrite(D1, relayState ? LOW : HIGH);
-  server.sendHeader("Location", "/");
-  server.send(303);
+  if (relayState) {
+    page += "<p>Durum: <b>AÇIK</b></p>";
+    page += "<a href='/off'><button class='off'>KAPAT</button></a>";
+  } else {
+    page += "<p>Durum: <b>KAPALI</b></p>";
+    page += "<a href='/on'><button class='on'>AÇ</button></a>";
+  }
+
+  page += "<br><br><a href='/update'>OTA Güncelleme</a>";
+  page += "</body></html>";
+  return page;
 }
 
 void setup() {
-  pinMode(D1, OUTPUT);
-  digitalWrite(D1, HIGH);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
 
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid, password);
+  WiFi.softAP(ap_ssid, ap_pass);
 
-  ArduinoOTA.setHostname("nodemcu-ota");
-  ArduinoOTA.begin();
+  server.on("/", []() {
+    server.send(200, "text/html", webpage());
+  });
 
-  server.on("/", handleRoot);
-  server.on("/toggle", handleToggle);
+  server.on("/on", []() {
+    relayState = true;
+    digitalWrite(RELAY_PIN, LOW);
+    server.sendHeader("Location", "/");
+    server.send(303);
+  });
+
+  server.on("/off", []() {
+    relayState = false;
+    digitalWrite(RELAY_PIN, HIGH);
+    server.sendHeader("Location", "/");
+    server.send(303);
+  });
+
+  httpUpdater.setup(&server, "/update");
+
   server.begin();
 }
 
 void loop() {
-  ArduinoOTA.handle();
   server.handleClient();
 }
