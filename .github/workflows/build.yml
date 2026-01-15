@@ -29,12 +29,15 @@ jobs:
       - name: Compile OTA Compatible BIN
         run: |
           arduino-cli compile \
-            --fqbn esp8266:esp8266:nodemcuv2:CpuFrequency=80,FlashSize=4M1M,LwIPVariant=v2lower,SSL=basic \
+            --fqbn esp8266:esp8266:nodemcuv2:CpuFrequency=80,FlashSize=4M1M,LwIPVariant=v2lower \
             --output-dir build \
             ./nodemcu-ota-relay.ino
 
       - name: Upload BIN
         uses: actions/upload-artifact@v4
+        with:
+          name: nodemcu-bin
+          path: build/*.bin        uses: actions/upload-artifact@v4
         with:
           name: nodemcu-bin
           path: build/*.bin 
