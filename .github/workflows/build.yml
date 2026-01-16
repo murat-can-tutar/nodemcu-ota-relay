@@ -2,8 +2,7 @@ name: Build NodeMCU BIN
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -11,30 +10,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Arduino CLI
-        run: |
+      - run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
           sudo mv bin/arduino-cli /usr/local/bin/
 
-      - name: Setup ESP8266 core
-        run: |
+      - run: |
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
           arduino-cli core update-index
           arduino-cli core install esp8266:esp8266
 
-      - name: Compile OTA Compatible BIN
-        run: |
-          arduino-cli compile \
-            --fqbn esp8266:esp8266:nodemcuv2:CpuFrequency=80,FlashSize=4M1M,LwIPVariant=v2lower \
-            --output-dir build \
-            ./nodemcu-ota-relay.ino
+      - run: |
+          arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --output-dir build .
 
-      - name: Upload BIN
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nodemcu-bin
+          path: build/*.bin        uses: actions/upload-artifact@v4
         with:
           name: nodemcu-bin
           path: build/*.bin        uses: actions/upload-artifact@v4
