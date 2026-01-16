@@ -4,7 +4,7 @@
 
 // --- AYARLAR ---
 const char* ssid = "MCT LED";      
-const char* password = "192513";   
+const char* password = "192513356";   
 
 // Sabit IP (ESP32'deki nodeMcuIP ile aynı olmalı)
 IPAddress local_IP(192, 168, 4, 50);
