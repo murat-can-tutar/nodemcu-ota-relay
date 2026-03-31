@@ -6,10 +6,10 @@
 #include <Updater.h>
 
 // =========================
-// WIFI
+// ACCESS POINT AYARLARI
 // =========================
-const char* ssid = "RKS";
-const char* password = "44AFT748";
+const char* apSSID = "RKS";
+const char* apPassword = "44AFT748";
 
 // =========================
 // WEB SERVER
@@ -18,7 +18,7 @@ ESP8266WebServer server(80);
 
 // =========================
 // PINLER - NodeMCU ESP8266
-// LOW aktif röle kartına göre
+// LOW aktif röle kartı
 // =========================
 #define RELAY_LOCK_OPEN   D1   // GPIO5
 #define RELAY_LOCK_CLOSE  D2   // GPIO4
@@ -30,14 +30,15 @@ ESP8266WebServer server(80);
 #define RELAY_SEAT        D4   // GPIO2
 
 // Servo pinleri
-// Not: TX/RX kullanıldığı için Serial Monitor kullanma
 #define SERVO_RIGHT_PIN   3    // RX / GPIO3
 #define SERVO_LEFT_PIN    1    // TX / GPIO1
 
 // Bağımsız servo tetik girişi
-// NodeMCU A0 girişine sadece 0-3.3V ver
 #define SERVO_TRIGGER_PIN A0
-const int SERVO_TRIGGER_THRESHOLD = 600; // ~1.9V üstü = aktif
+
+// A0 trigger eşikleri (histerezis)
+const int SERVO_TRIGGER_ON_THRESHOLD  = 700;
+const int SERVO_TRIGGER_OFF_THRESHOLD = 300;
 
 // =========================
 // EEPROM
@@ -69,29 +70,25 @@ bool mirrorsOpen = false;
 // DURUMLAR
 // =========================
 bool motorRunning = false;
-
 bool ledState = false;
 bool fogState = false;
 bool headlightState = false;
-
-// koltuk pulse, toggle değil
 bool otaUploadSuccess = false;
 
 // =========================
-// LOG
+// LOG - Son 10 satır
 // =========================
 String logLines[10];
 uint8_t logCount = 0;
 
 void addLog(const String &msg) {
-  String line = msg;
   if (logCount < 10) {
-    logLines[logCount++] = line;
+    logLines[logCount++] = msg;
   } else {
     for (uint8_t i = 0; i < 9; i++) {
       logLines[i] = logLines[i + 1];
     }
-    logLines[9] = line;
+    logLines[9] = msg;
   }
 }
 
@@ -193,7 +190,7 @@ String page = R"rawliteral(
 <title>RKS Motor Panel</title>
 <style>
   body{
-    font-family: Arial, sans-serif;
+    font-family:Arial,sans-serif;
     background:#111;
     color:#eee;
     margin:0;
@@ -283,7 +280,7 @@ String page = R"rawliteral(
   <div class="card">
     <h2>RKS Motor Kontrol Paneli</h2>
     <div>Durum: <span id="statusText">Baglaniyor...</span></div>
-    <div class="small">Motor durumu ve pin islemleri alttaki log ekraninda gorunur.</div>
+    <div class="small">Wi-Fi: RKS | Panel: 192.168.4.1</div>
   </div>
 
   <div class="card">
@@ -340,7 +337,7 @@ String page = R"rawliteral(
     </div>
 
     <div class="small">
-      A0 tetik aktif oldugunda aynalar acik acilara gider, pasif oldugunda kapali acilara doner.
+      A0 aktif olunca aynalar acik acilara gider, pasif olunca kapali acilara doner.
     </div>
   </div>
 
@@ -455,7 +452,7 @@ setInterval(updateStatus, 1000);
 // =========================
 String buildStatusJson() {
   String json = "{";
-  json += "\"status\":\"Baglandi\",";
+  json += "\"status\":\"Baglandi (192.168.4.1)\",";
   json += "\"motor\":" + String(motorRunning ? "true" : "false") + ",";
   json += "\"far\":" + String(headlightState ? "true" : "false") + ",";
   json += "\"fog\":" + String(fogState ? "true" : "false") + ",";
@@ -484,7 +481,6 @@ void handleStatus() {
 void handleCommand() {
   String c = server.arg("c");
 
-  // MOTOR TEK TUS MANTIGI
   if (c == "motor") {
     if (!motorRunning) {
       addLog("Motor start -> Kilit Ac [GPIO5]");
@@ -508,7 +504,6 @@ void handleCommand() {
     return;
   }
 
-  // MOTOR CALISIRKEN KILIT/ALARM KAPALI
   if (motorRunning) {
     if (c == "lock_open" || c == "lock_close" || c == "alarm") {
       addLog("Komut engellendi: motor acik");
@@ -564,14 +559,11 @@ void handleServoSave() {
   mirrorCfg.leftClosed  = constrain(server.arg("lc").toInt(), 0, 180);
 
   saveMirrorConfig();
-
   addLog("Ayna ayarlari kaydedildi");
 
-  // O anki tetik durumuna gore servolari hemen yeni pozisyona getir
   int triggerValue = analogRead(SERVO_TRIGGER_PIN);
-  bool triggerActive = (triggerValue >= SERVO_TRIGGER_THRESHOLD);
 
-  if (triggerActive) {
+  if (triggerValue >= SERVO_TRIGGER_ON_THRESHOLD) {
     writeMirrorsNow(mirrorCfg.rightOpen, mirrorCfg.leftOpen);
     mirrorsOpen = true;
     addLog("Kayit sonrasi acik pozisyon uygulandi");
@@ -592,25 +584,29 @@ void handleUpdateUpload() {
 
   if (upload.status == UPLOAD_FILE_START) {
     otaUploadSuccess = false;
-    WiFiUDP::stopAll();
     addLog("Web OTA basladi");
 
     uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-    if (!Update.begin(maxSketchSpace)) {
-      Update.printError(Serial);
+    if (Update.begin(maxSketchSpace)) {
+      otaUploadSuccess = true;
+    } else {
+      otaUploadSuccess = false;
+      addLog("Update.begin hatasi");
     }
   }
   else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-      Update.printError(Serial);
+    if (otaUploadSuccess) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        otaUploadSuccess = false;
+        addLog("OTA yazma hatasi");
+      }
     }
   }
   else if (upload.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) {
+    if (otaUploadSuccess && Update.end(true)) {
       otaUploadSuccess = true;
       addLog("Web OTA tamamlandi");
     } else {
-      Update.printError(Serial);
       otaUploadSuccess = false;
       addLog("Web OTA hata");
     }
@@ -619,9 +615,10 @@ void handleUpdateUpload() {
 
 void handleUpdateFinish() {
   server.sendHeader("Connection", "close");
+
   if (otaUploadSuccess) {
     server.send(200, "text/plain", "GUNCELLEME_BASARILI");
-    delay(500);
+    delay(700);
     ESP.restart();
   } else {
     server.send(500, "text/plain", "GUNCELLEME_HATA");
@@ -632,7 +629,6 @@ void handleUpdateFinish() {
 // SETUP
 // =========================
 void setup() {
-  // Serial yok: TX/RX servo icin kullaniliyor
   loadMirrorConfig();
 
   pinMode(RELAY_LOCK_OPEN, OUTPUT);
@@ -644,7 +640,6 @@ void setup() {
   pinMode(RELAY_HEADLIGHT, OUTPUT);
   pinMode(RELAY_SEAT, OUTPUT);
 
-  // Hepsi kapali
   relayOff(RELAY_LOCK_OPEN);
   relayOff(RELAY_LOCK_CLOSE);
   relayOff(RELAY_START);
@@ -654,21 +649,14 @@ void setup() {
   relayOff(RELAY_HEADLIGHT);
   relayOff(RELAY_SEAT);
 
-  // Servo attach
   servoRight.attach(SERVO_RIGHT_PIN);
   servoLeft.attach(SERVO_LEFT_PIN);
 
-  // Baslangicta kapali pozisyona al
   writeMirrorsNow(mirrorCfg.rightClosed, mirrorCfg.leftClosed);
   mirrorsOpen = false;
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(350);
-    yield();
-  }
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apSSID, apPassword);
 
   ArduinoOTA.setHostname("RKS-Motor");
   ArduinoOTA.onStart([]() {
@@ -687,8 +675,9 @@ void setup() {
 
   server.begin();
 
-  addLog("WiFi baglandi");
-  addLog("IP: " + WiFi.localIP().toString());
+  addLog("AP baslatildi");
+  addLog("SSID: RKS");
+  addLog("IP: 192.168.4.1");
   addLog("Panel hazir");
 }
 
@@ -699,32 +688,31 @@ void loop() {
   ArduinoOTA.handle();
   server.handleClient();
 
-  static bool lastTriggerActive = false;
+  static bool stableTriggerState = false;
   static bool firstRead = true;
 
   int triggerValue = analogRead(SERVO_TRIGGER_PIN);
-  bool triggerActive = (triggerValue >= SERVO_TRIGGER_THRESHOLD);
 
   if (firstRead) {
-    lastTriggerActive = triggerActive;
     firstRead = false;
 
-    if (triggerActive) {
+    if (triggerValue >= SERVO_TRIGGER_ON_THRESHOLD) {
+      stableTriggerState = true;
       openMirrors();
     } else {
+      stableTriggerState = false;
       closeMirrors();
     }
   }
 
-  if (triggerActive != lastTriggerActive) {
-    lastTriggerActive = triggerActive;
-
-    if (triggerActive) {
-      addLog("Servo tetik aktif (A0)");
-      openMirrors();
-    } else {
-      addLog("Servo tetik pasif (A0)");
-      closeMirrors();
-    }
+  if (!stableTriggerState && triggerValue >= SERVO_TRIGGER_ON_THRESHOLD) {
+    stableTriggerState = true;
+    addLog("Servo tetik aktif (A0)");
+    openMirrors();
   }
-} 
+  else if (stableTriggerState && triggerValue <= SERVO_TRIGGER_OFF_THRESHOLD) {
+    stableTriggerState = false;
+    addLog("Servo tetik pasif (A0)");
+    closeMirrors();
+  }
+}
