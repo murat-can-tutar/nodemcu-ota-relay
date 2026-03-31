@@ -5,309 +5,726 @@
 #include <Servo.h>
 #include <Updater.h>
 
+// =========================
 // WIFI
+// =========================
 const char* ssid = "RKS";
 const char* password = "44AFT748";
 
+// =========================
+// WEB SERVER
+// =========================
 ESP8266WebServer server(80);
 
-// RÖLELER (LOW AKTİF)
-#define RELAY_START D1
-#define RELAY_HORN D2
-#define RELAY_LOCK_OPEN D5
-#define RELAY_LOCK_CLOSE D6
-#define RELAY_LED D7
-#define RELAY_FOG D8
-#define RELAY_HEADLIGHT D0
-#define RELAY_SEAT D3
+// =========================
+// PINLER - NodeMCU ESP8266
+// LOW aktif röle kartına göre
+// =========================
+#define RELAY_LOCK_OPEN   D1   // GPIO5
+#define RELAY_LOCK_CLOSE  D2   // GPIO4
+#define RELAY_START       D5   // GPIO14
+#define RELAY_ALARM       D6   // GPIO12
+#define RELAY_LED         D7   // GPIO13
+#define RELAY_FOG         D0   // GPIO16
+#define RELAY_HEADLIGHT   D3   // GPIO0
+#define RELAY_SEAT        D4   // GPIO2
 
+// Servo pinleri
+// Not: TX/RX kullanıldığı için Serial Monitor kullanma
+#define SERVO_RIGHT_PIN   3    // RX / GPIO3
+#define SERVO_LEFT_PIN    1    // TX / GPIO1
+
+// Bağımsız servo tetik girişi
+// NodeMCU A0 girişine sadece 0-3.3V ver
+#define SERVO_TRIGGER_PIN A0
+const int SERVO_TRIGGER_THRESHOLD = 600; // ~1.9V üstü = aktif
+
+// =========================
+// EEPROM
+// =========================
+#define EEPROM_SIZE 64
+#define EEPROM_MAGIC 0x4D
+
+struct MirrorConfig {
+  uint8_t magic;
+  uint8_t rightOpen;
+  uint8_t leftOpen;
+  uint8_t rightClosed;
+  uint8_t leftClosed;
+};
+
+MirrorConfig mirrorCfg;
+
+// =========================
 // SERVO
-#define SERVO_RIGHT 3   // RX
-#define SERVO_LEFT 1    // TX
-#define SERVO_TRIGGER D4
-
+// =========================
 Servo servoRight;
 Servo servoLeft;
 
+int currentRightPos = 0;
+int currentLeftPos = 0;
+bool mirrorsOpen = false;
+
+// =========================
 // DURUMLAR
-bool motorRunning=false;
-bool ledState=false;
-bool fogState=false;
-bool headlightState=false;
-bool seatState=false;
+// =========================
+bool motorRunning = false;
 
-// SERVO
-int rightAngle=90;
-int leftAngle=90;
+bool ledState = false;
+bool fogState = false;
+bool headlightState = false;
 
-// LOG SİSTEMİ
-String logs[10];
-int logIndex=0;
+// koltuk pulse, toggle değil
+bool otaUploadSuccess = false;
 
-void addLog(String msg){
-  logs[logIndex]=msg;
-  logIndex=(logIndex+1)%10;
+// =========================
+// LOG
+// =========================
+String logLines[10];
+uint8_t logCount = 0;
+
+void addLog(const String &msg) {
+  String line = msg;
+  if (logCount < 10) {
+    logLines[logCount++] = line;
+  } else {
+    for (uint8_t i = 0; i < 9; i++) {
+      logLines[i] = logLines[i + 1];
+    }
+    logLines[9] = line;
+  }
 }
 
-String getLogs(){
-  String out="";
-  for(int i=0;i<10;i++){
-    int idx=(logIndex+i)%10;
-    if(logs[idx]!="") out+=logs[idx]+"<br>";
+String getLogsHtml() {
+  String out = "";
+  for (uint8_t i = 0; i < logCount; i++) {
+    out += logLines[i];
+    if (i < logCount - 1) out += "<br>";
   }
   return out;
 }
 
-// PULSE
-void pulseRelay(int pin,int times=1){
-  for(int i=0;i<times;i++){
-    digitalWrite(pin,LOW);
-    delay(250);
-    digitalWrite(pin,HIGH);
-    delay(250);
+// =========================
+// RÖLE YARDIMCI
+// LOW aktif
+// =========================
+void relayOff(uint8_t pin) {
+  digitalWrite(pin, HIGH);
+}
+
+void relayOn(uint8_t pin) {
+  digitalWrite(pin, LOW);
+}
+
+void pulseRelay(uint8_t pin, uint8_t times = 1, uint16_t onMs = 250, uint16_t offMs = 250) {
+  for (uint8_t i = 0; i < times; i++) {
+    relayOn(pin);
+    delay(onMs);
+    relayOff(pin);
+    if (i < times - 1) delay(offMs);
+    yield();
   }
 }
 
+void setToggleRelay(uint8_t pin, bool stateOn) {
+  digitalWrite(pin, stateOn ? LOW : HIGH);
+}
+
+// =========================
 // EEPROM
-void saveAngles(){
-  EEPROM.write(0,rightAngle);
-  EEPROM.write(1,leftAngle);
+// =========================
+void loadMirrorConfig() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(0, mirrorCfg);
+
+  if (mirrorCfg.magic != EEPROM_MAGIC ||
+      mirrorCfg.rightOpen > 180 ||
+      mirrorCfg.leftOpen > 180 ||
+      mirrorCfg.rightClosed > 180 ||
+      mirrorCfg.leftClosed > 180) {
+    mirrorCfg.magic = EEPROM_MAGIC;
+    mirrorCfg.rightOpen = 90;
+    mirrorCfg.leftOpen = 90;
+    mirrorCfg.rightClosed = 0;
+    mirrorCfg.leftClosed = 0;
+    EEPROM.put(0, mirrorCfg);
+    EEPROM.commit();
+  }
+}
+
+void saveMirrorConfig() {
+  mirrorCfg.magic = EEPROM_MAGIC;
+  EEPROM.put(0, mirrorCfg);
   EEPROM.commit();
 }
 
+// =========================
+// SERVO
+// =========================
+void writeMirrorsNow(int r, int l) {
+  currentRightPos = constrain(r, 0, 180);
+  currentLeftPos = constrain(l, 0, 180);
+
+  servoRight.write(currentRightPos);
+  servoLeft.write(currentLeftPos);
+}
+
+void openMirrors() {
+  writeMirrorsNow(mirrorCfg.rightOpen, mirrorCfg.leftOpen);
+  mirrorsOpen = true;
+  addLog("Aynalar acildi");
+}
+
+void closeMirrors() {
+  writeMirrorsNow(mirrorCfg.rightClosed, mirrorCfg.leftClosed);
+  mirrorsOpen = false;
+  addLog("Aynalar kapandi");
+}
+
+// =========================
 // HTML
+// =========================
 String page = R"rawliteral(
 <!DOCTYPE html>
-<html>
+<html lang="tr">
 <head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RKS Motor Panel</title>
 <style>
-body {text-align:center;font-family:Arial;}
-button {padding:10px;margin:5px;border-radius:10px;}
+  body{
+    font-family: Arial, sans-serif;
+    background:#111;
+    color:#eee;
+    margin:0;
+    padding:16px;
+    text-align:center;
+  }
+  .wrap{
+    max-width:700px;
+    margin:0 auto;
+  }
+  .card{
+    background:#1b1b1b;
+    border:1px solid #333;
+    border-radius:14px;
+    padding:14px;
+    margin-bottom:14px;
+  }
+  h2,h3{
+    margin:8px 0 14px 0;
+  }
+  .row{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    justify-content:center;
+    margin-bottom:10px;
+  }
+  button{
+    min-width:130px;
+    padding:12px 14px;
+    border:none;
+    border-radius:10px;
+    color:white;
+    font-size:15px;
+    cursor:pointer;
+  }
+  button:disabled{
+    opacity:0.45;
+    cursor:not-allowed;
+  }
+  .red{background:#c62828;}
+  .green{background:#2e7d32;}
+  .blue{background:#1565c0;}
+  .orange{background:#ef6c00;}
+  .gray{background:#555;}
+  .slider-wrap{
+    text-align:left;
+    margin:10px 0;
+  }
+  .slider-wrap label{
+    display:block;
+    margin-bottom:6px;
+  }
+  input[type=range]{
+    width:100%;
+  }
+  .small{
+    font-size:13px;
+    color:#bbb;
+  }
+  #statusText{
+    font-weight:bold;
+  }
+  #logBox{
+    min-height:170px;
+    max-height:170px;
+    overflow:auto;
+    text-align:left;
+    background:#000;
+    color:#00ff66;
+    border:1px solid #333;
+    border-radius:10px;
+    padding:10px;
+    font-family:monospace;
+    font-size:13px;
+  }
+  input[type=file]{
+    width:100%;
+    color:#ddd;
+    margin-bottom:10px;
+  }
 </style>
 </head>
 <body>
+<div class="wrap">
 
-<h2>Motor Panel</h2>
+  <div class="card">
+    <h2>RKS Motor Kontrol Paneli</h2>
+    <div>Durum: <span id="statusText">Baglaniyor...</span></div>
+    <div class="small">Motor durumu ve pin islemleri alttaki log ekraninda gorunur.</div>
+  </div>
 
-<p>Durum: <span id="status">Baglaniyor...</span></p>
+  <div class="card">
+    <h3>Motor</h3>
+    <div class="row">
+      <button id="motorBtn" class="red" onclick="sendCmd('motor')">Motoru Calistir</button>
+    </div>
+  </div>
 
-<button id="motorBtn" onclick="send('motor')">Motor</button><br><br>
+  <div class="card">
+    <h3>Kumanda</h3>
+    <div class="row">
+      <button id="lockOpenBtn" class="gray ctrl" onclick="sendCmd('lock_open')">Kilit Ac</button>
+      <button id="lockCloseBtn" class="gray ctrl" onclick="sendCmd('lock_close')">Kilit Kapat</button>
+      <button id="alarmBtn" class="orange ctrl" onclick="sendCmd('alarm')">Alarm</button>
+    </div>
+  </div>
 
-<button onclick="send('lock_open')">Kilit Aç</button>
-<button onclick="send('lock_close')">Kilit Kapat</button>
-<button onclick="send('alarm')">Alarm</button><br><br>
+  <div class="card">
+    <h3>Aydinlatma</h3>
+    <div class="row">
+      <button id="farBtn" class="red ctrl" onclick="sendCmd('far')">Far</button>
+      <button id="fogBtn" class="red ctrl" onclick="sendCmd('fog')">Sis</button>
+      <button id="ledBtn" class="red ctrl" onclick="sendCmd('led')">LED</button>
+      <button id="seatBtn" class="orange ctrl" onclick="sendCmd('seat')">Koltuk</button>
+    </div>
+  </div>
 
-<button onclick="send('far')">Far</button>
-<button onclick="send('fog')">Sis</button>
-<button onclick="send('led')">LED</button>
-<button onclick="send('seat')">Koltuk</button><br><br>
+  <div class="card">
+    <h3>Ayna Ayarlari</h3>
 
-<input type="range" min="0" max="180" id="r" onchange="servo()"><br>
-<input type="range" min="0" max="180" id="l" onchange="servo()"><br><br>
+    <div class="slider-wrap">
+      <label>Sag Acik Aci: <span id="roVal">90</span></label>
+      <input id="ro" type="range" min="0" max="180" value="90" oninput="syncLabels()">
+    </div>
 
-<form method='POST' action='/update' enctype='multipart/form-data'>
-<input type='file' name='update'>
-<input type='submit'>
-</form>
+    <div class="slider-wrap">
+      <label>Sol Acik Aci: <span id="loVal">90</span></label>
+      <input id="lo" type="range" min="0" max="180" value="90" oninput="syncLabels()">
+    </div>
 
-<h3>Log Paneli</h3>
-<div id="log" style="height:200px;overflow:auto;border:1px solid black;"></div>
+    <div class="slider-wrap">
+      <label>Sag Kapali Aci: <span id="rcVal">0</span></label>
+      <input id="rc" type="range" min="0" max="180" value="0" oninput="syncLabels()">
+    </div>
+
+    <div class="slider-wrap">
+      <label>Sol Kapali Aci: <span id="lcVal">0</span></label>
+      <input id="lc" type="range" min="0" max="180" value="0" oninput="syncLabels()">
+    </div>
+
+    <div class="row">
+      <button id="saveMirrorBtn" class="blue ctrl" onclick="saveMirrors()">Ayna Ayarlarini Kaydet</button>
+    </div>
+
+    <div class="small">
+      A0 tetik aktif oldugunda aynalar acik acilara gider, pasif oldugunda kapali acilara doner.
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>OTA Guncelleme</h3>
+    <form method="POST" action="/update" enctype="multipart/form-data">
+      <input type="file" name="update">
+      <button class="green" type="submit">BIN Dosyasi Yukle</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3>Bilgi Ekrani (Son 10 Kayit)</h3>
+    <div id="logBox"></div>
+  </div>
+</div>
 
 <script>
-function send(c){ fetch('/cmd?c='+c); }
+let uiLoaded = false;
 
-function servo(){
- let r=document.getElementById("r").value;
- let l=document.getElementById("l").value;
- fetch('/servo?r='+r+'&l='+l);
+function syncLabels(){
+  document.getElementById('roVal').textContent = document.getElementById('ro').value;
+  document.getElementById('loVal').textContent = document.getElementById('lo').value;
+  document.getElementById('rcVal').textContent = document.getElementById('rc').value;
+  document.getElementById('lcVal').textContent = document.getElementById('lc').value;
 }
 
-function update(){
- fetch('/status')
- .then(r=>r.json())
- .then(d=>{
-  document.getElementById("status").innerHTML=d.status;
-
-  let m=document.getElementById("motorBtn");
-  if(d.motor){
-    m.innerHTML="Motoru Kapat";
-  }else{
-    m.innerHTML="Motoru Çalıştır";
-  }
-
-  document.getElementById("log").innerHTML=d.logs;
- });
+function setControlsEnabled(enabled){
+  document.querySelectorAll('.ctrl').forEach(el => el.disabled = !enabled);
 }
-setInterval(update,1000);
+
+function sendCmd(cmd){
+  fetch('/cmd?c=' + encodeURIComponent(cmd), {cache:'no-store'})
+    .then(() => setTimeout(updateStatus, 150))
+    .catch(() => {
+      document.getElementById('statusText').textContent = 'Baglanti Yok';
+      setControlsEnabled(false);
+    });
+}
+
+function saveMirrors(){
+  const ro = document.getElementById('ro').value;
+  const lo = document.getElementById('lo').value;
+  const rc = document.getElementById('rc').value;
+  const lc = document.getElementById('lc').value;
+
+  fetch('/servo/save?ro=' + ro + '&lo=' + lo + '&rc=' + rc + '&lc=' + lc, {cache:'no-store'})
+    .then(() => setTimeout(updateStatus, 150))
+    .catch(() => {
+      document.getElementById('statusText').textContent = 'Baglanti Yok';
+      setControlsEnabled(false);
+    });
+}
+
+function applyButtonStates(d){
+  const motorBtn = document.getElementById('motorBtn');
+  const farBtn = document.getElementById('farBtn');
+  const fogBtn = document.getElementById('fogBtn');
+  const ledBtn = document.getElementById('ledBtn');
+
+  motorBtn.textContent = d.motor ? 'Motoru Kapat' : 'Motoru Calistir';
+  motorBtn.className = d.motor ? 'green' : 'red';
+
+  farBtn.className = d.far ? 'blue ctrl' : 'red ctrl';
+  fogBtn.className = d.fog ? 'blue ctrl' : 'red ctrl';
+  ledBtn.className = d.led ? 'green ctrl' : 'red ctrl';
+
+  document.getElementById('lockOpenBtn').disabled = d.motor;
+  document.getElementById('lockCloseBtn').disabled = d.motor;
+  document.getElementById('alarmBtn').disabled = d.motor;
+}
+
+function updateStatus(){
+  fetch('/status', {cache:'no-store'})
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('statusText').textContent = d.status;
+      setControlsEnabled(true);
+
+      if(!uiLoaded){
+        document.getElementById('ro').value = d.ro;
+        document.getElementById('lo').value = d.lo;
+        document.getElementById('rc').value = d.rc;
+        document.getElementById('lc').value = d.lc;
+        syncLabels();
+        uiLoaded = true;
+      }
+
+      applyButtonStates(d);
+
+      const logBox = document.getElementById('logBox');
+      logBox.innerHTML = d.logs || '';
+      logBox.scrollTop = logBox.scrollHeight;
+    })
+    .catch(() => {
+      document.getElementById('statusText').textContent = 'Baglanti Yok';
+      setControlsEnabled(false);
+    });
+}
+
+syncLabels();
+updateStatus();
+setInterval(updateStatus, 1000);
 </script>
 
 </body>
 </html>
 )rawliteral";
 
-// WEB
-void handleRoot(){ server.send(200,"text/html",page); }
+// =========================
+// STATUS JSON
+// =========================
+String buildStatusJson() {
+  String json = "{";
+  json += "\"status\":\"Baglandi\",";
+  json += "\"motor\":" + String(motorRunning ? "true" : "false") + ",";
+  json += "\"far\":" + String(headlightState ? "true" : "false") + ",";
+  json += "\"fog\":" + String(fogState ? "true" : "false") + ",";
+  json += "\"led\":" + String(ledState ? "true" : "false") + ",";
+  json += "\"mirrorsOpen\":" + String(mirrorsOpen ? "true" : "false") + ",";
+  json += "\"ro\":" + String(mirrorCfg.rightOpen) + ",";
+  json += "\"lo\":" + String(mirrorCfg.leftOpen) + ",";
+  json += "\"rc\":" + String(mirrorCfg.rightClosed) + ",";
+  json += "\"lc\":" + String(mirrorCfg.leftClosed) + ",";
+  json += "\"logs\":\"" + getLogsHtml() + "\"";
+  json += "}";
+  return json;
+}
 
-void handleCmd(){
-  String c=server.arg("c");
+// =========================
+// ROUTE HANDLERLAR
+// =========================
+void handleRoot() {
+  server.send(200, "text/html; charset=utf-8", page);
+}
 
-  if(c=="motor"){
-    if(!motorRunning){
-      pulseRelay(RELAY_LOCK_OPEN);
-      delay(400);
-      pulseRelay(RELAY_START,2);
-      motorRunning=true;
-      addLog("Motor Baslatildi");
-    }else{
-      pulseRelay(RELAY_LOCK_OPEN);
-      motorRunning=false;
-      addLog("Motor Kapatildi");
+void handleStatus() {
+  server.send(200, "application/json", buildStatusJson());
+}
+
+void handleCommand() {
+  String c = server.arg("c");
+
+  // MOTOR TEK TUS MANTIGI
+  if (c == "motor") {
+    if (!motorRunning) {
+      addLog("Motor start -> Kilit Ac [GPIO5]");
+      pulseRelay(RELAY_LOCK_OPEN, 1, 250, 250);
+      delay(350);
+
+      addLog("Motor start -> Start 2 pulse [GPIO14]");
+      pulseRelay(RELAY_START, 2, 250, 300);
+
+      motorRunning = true;
+      addLog("Motor calisiyor");
+    } else {
+      addLog("Motor stop -> Kilit Ac [GPIO5]");
+      pulseRelay(RELAY_LOCK_OPEN, 1, 250, 250);
+
+      motorRunning = false;
+      addLog("Motor durduruldu");
+    }
+
+    server.send(200, "text/plain", "OK");
+    return;
+  }
+
+  // MOTOR CALISIRKEN KILIT/ALARM KAPALI
+  if (motorRunning) {
+    if (c == "lock_open" || c == "lock_close" || c == "alarm") {
+      addLog("Komut engellendi: motor acik");
+      server.send(200, "text/plain", "LOCKED_WHILE_RUNNING");
+      return;
     }
   }
 
-  if(!motorRunning){
-    if(c=="lock_open"){ pulseRelay(RELAY_LOCK_OPEN); addLog("Kilit Acildi"); }
-    if(c=="lock_close"){ pulseRelay(RELAY_LOCK_CLOSE); addLog("Kilit Kapandi"); }
-    if(c=="alarm"){ pulseRelay(RELAY_HORN); addLog("Alarm Caldi"); }
+  if (c == "lock_open") {
+    pulseRelay(RELAY_LOCK_OPEN, 1, 250, 250);
+    addLog("Kilit ac [GPIO5]");
+  }
+  else if (c == "lock_close") {
+    pulseRelay(RELAY_LOCK_CLOSE, 1, 250, 250);
+    addLog("Kilit kapat [GPIO4]");
+  }
+  else if (c == "alarm") {
+    pulseRelay(RELAY_ALARM, 1, 300, 250);
+    addLog("Alarm [GPIO12]");
+  }
+  else if (c == "far") {
+    headlightState = !headlightState;
+    setToggleRelay(RELAY_HEADLIGHT, headlightState);
+    addLog(headlightState ? "Far acildi [GPIO0]" : "Far kapandi [GPIO0]");
+  }
+  else if (c == "fog") {
+    fogState = !fogState;
+    setToggleRelay(RELAY_FOG, fogState);
+    addLog(fogState ? "Sis acildi [GPIO16]" : "Sis kapandi [GPIO16]");
+  }
+  else if (c == "led") {
+    ledState = !ledState;
+    setToggleRelay(RELAY_LED, ledState);
+    addLog(ledState ? "LED acildi [GPIO13]" : "LED kapandi [GPIO13]");
+  }
+  else if (c == "seat") {
+    addLog("Koltuk pulse [GPIO2]");
+    pulseRelay(RELAY_SEAT, 1, 1200, 250);
   }
 
-  if(c=="far"){
-    headlightState=!headlightState;
-    digitalWrite(RELAY_HEADLIGHT, headlightState?LOW:HIGH);
-    addLog(headlightState?"Far Acildi":"Far Kapandi");
-  }
-
-  if(c=="fog"){
-    fogState=!fogState;
-    digitalWrite(RELAY_FOG, fogState?LOW:HIGH);
-    addLog(fogState?"Sis Acildi":"Sis Kapandi");
-  }
-
-  if(c=="led"){
-    ledState=!ledState;
-    digitalWrite(RELAY_LED, ledState?LOW:HIGH);
-    addLog(ledState?"LED Acildi":"LED Kapandi");
-  }
-
-  if(c=="seat"){
-    seatState=!seatState;
-    digitalWrite(RELAY_SEAT, seatState?LOW:HIGH);
-    addLog(seatState?"Koltuk Acildi":"Koltuk Kapandi");
-  }
-
-  server.send(200,"text/plain","OK");
+  server.send(200, "text/plain", "OK");
 }
 
-void handleServo(){
-  rightAngle=server.arg("r").toInt();
-  leftAngle=server.arg("l").toInt();
+void handleServoSave() {
+  if (!server.hasArg("ro") || !server.hasArg("lo") || !server.hasArg("rc") || !server.hasArg("lc")) {
+    server.send(400, "text/plain", "MISSING_ARGS");
+    return;
+  }
 
-  servoRight.write(rightAngle);
-  servoLeft.write(leftAngle);
+  mirrorCfg.rightOpen   = constrain(server.arg("ro").toInt(), 0, 180);
+  mirrorCfg.leftOpen    = constrain(server.arg("lo").toInt(), 0, 180);
+  mirrorCfg.rightClosed = constrain(server.arg("rc").toInt(), 0, 180);
+  mirrorCfg.leftClosed  = constrain(server.arg("lc").toInt(), 0, 180);
 
-  saveAngles();
-  addLog("Servo Ayarlandi");
+  saveMirrorConfig();
 
-  server.send(200,"text/plain","OK");
+  addLog("Ayna ayarlari kaydedildi");
+
+  // O anki tetik durumuna gore servolari hemen yeni pozisyona getir
+  int triggerValue = analogRead(SERVO_TRIGGER_PIN);
+  bool triggerActive = (triggerValue >= SERVO_TRIGGER_THRESHOLD);
+
+  if (triggerActive) {
+    writeMirrorsNow(mirrorCfg.rightOpen, mirrorCfg.leftOpen);
+    mirrorsOpen = true;
+    addLog("Kayit sonrasi acik pozisyon uygulandi");
+  } else {
+    writeMirrorsNow(mirrorCfg.rightClosed, mirrorCfg.leftClosed);
+    mirrorsOpen = false;
+    addLog("Kayit sonrasi kapali pozisyon uygulandi");
+  }
+
+  server.send(200, "text/plain", "OK");
 }
 
-void handleStatus(){
-  String json="{";
-  json+="\"status\":\"Baglandi\",";
-  json+="\"motor\":"+String(motorRunning?"true":"false")+",";
-  json+="\"logs\":\""+getLogs()+"\"";
-  json+="}";
-  server.send(200,"application/json",json);
-}
-
-void handleUpdate(){
+// =========================
+// OTA UPLOAD
+// =========================
+void handleUpdateUpload() {
   HTTPUpload& upload = server.upload();
-  if(upload.status==UPLOAD_FILE_START) Update.begin();
-  else if(upload.status==UPLOAD_FILE_WRITE) Update.write(upload.buf,upload.currentSize);
-  else if(upload.status==UPLOAD_FILE_END) Update.end(true);
+
+  if (upload.status == UPLOAD_FILE_START) {
+    otaUploadSuccess = false;
+    WiFiUDP::stopAll();
+    addLog("Web OTA basladi");
+
+    uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+    if (!Update.begin(maxSketchSpace)) {
+      Update.printError(Serial);
+    }
+  }
+  else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  }
+  else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      otaUploadSuccess = true;
+      addLog("Web OTA tamamlandi");
+    } else {
+      Update.printError(Serial);
+      otaUploadSuccess = false;
+      addLog("Web OTA hata");
+    }
+  }
 }
 
+void handleUpdateFinish() {
+  server.sendHeader("Connection", "close");
+  if (otaUploadSuccess) {
+    server.send(200, "text/plain", "GUNCELLEME_BASARILI");
+    delay(500);
+    ESP.restart();
+  } else {
+    server.send(500, "text/plain", "GUNCELLEME_HATA");
+  }
+}
+
+// =========================
 // SETUP
-void setup(){
-  EEPROM.begin(10);
+// =========================
+void setup() {
+  // Serial yok: TX/RX servo icin kullaniliyor
+  loadMirrorConfig();
 
-  pinMode(RELAY_START,OUTPUT);
-  pinMode(RELAY_HORN,OUTPUT);
-  pinMode(RELAY_LOCK_OPEN,OUTPUT);
-  pinMode(RELAY_LOCK_CLOSE,OUTPUT);
-  pinMode(RELAY_LED,OUTPUT);
-  pinMode(RELAY_FOG,OUTPUT);
-  pinMode(RELAY_HEADLIGHT,OUTPUT);
-  pinMode(RELAY_SEAT,OUTPUT);
+  pinMode(RELAY_LOCK_OPEN, OUTPUT);
+  pinMode(RELAY_LOCK_CLOSE, OUTPUT);
+  pinMode(RELAY_START, OUTPUT);
+  pinMode(RELAY_ALARM, OUTPUT);
+  pinMode(RELAY_LED, OUTPUT);
+  pinMode(RELAY_FOG, OUTPUT);
+  pinMode(RELAY_HEADLIGHT, OUTPUT);
+  pinMode(RELAY_SEAT, OUTPUT);
 
-  // HEPSİ KAPALI
-  digitalWrite(RELAY_START,HIGH);
-  digitalWrite(RELAY_HORN,HIGH);
-  digitalWrite(RELAY_LOCK_OPEN,HIGH);
-  digitalWrite(RELAY_LOCK_CLOSE,HIGH);
-  digitalWrite(RELAY_LED,HIGH);
-  digitalWrite(RELAY_FOG,HIGH);
-  digitalWrite(RELAY_HEADLIGHT,HIGH);
-  digitalWrite(RELAY_SEAT,HIGH);
+  // Hepsi kapali
+  relayOff(RELAY_LOCK_OPEN);
+  relayOff(RELAY_LOCK_CLOSE);
+  relayOff(RELAY_START);
+  relayOff(RELAY_ALARM);
+  relayOff(RELAY_LED);
+  relayOff(RELAY_FOG);
+  relayOff(RELAY_HEADLIGHT);
+  relayOff(RELAY_SEAT);
 
-  pinMode(SERVO_TRIGGER,INPUT);
+  // Servo attach
+  servoRight.attach(SERVO_RIGHT_PIN);
+  servoLeft.attach(SERVO_LEFT_PIN);
 
-  servoRight.attach(SERVO_RIGHT);
-  servoLeft.attach(SERVO_LEFT);
+  // Baslangicta kapali pozisyona al
+  writeMirrorsNow(mirrorCfg.rightClosed, mirrorCfg.leftClosed);
+  mirrorsOpen = false;
 
-  WiFi.begin(ssid,password);
-  while(WiFi.status()!=WL_CONNECTED) delay(500);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
 
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(350);
+    yield();
+  }
+
+  ArduinoOTA.setHostname("RKS-Motor");
+  ArduinoOTA.onStart([]() {
+    addLog("Arduino OTA basladi");
+  });
+  ArduinoOTA.onEnd([]() {
+    addLog("Arduino OTA tamamlandi");
+  });
   ArduinoOTA.begin();
 
-  server.on("/",handleRoot);
-  server.on("/cmd",handleCmd);
-  server.on("/servo",handleServo);
-  server.on("/status",handleStatus);
-  server.on("/update",HTTP_POST,[](){server.send(200);},handleUpdate);
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/cmd", HTTP_GET, handleCommand);
+  server.on("/servo/save", HTTP_GET, handleServoSave);
+  server.on("/update", HTTP_POST, handleUpdateFinish, handleUpdateUpload);
 
   server.begin();
+
+  addLog("WiFi baglandi");
+  addLog("IP: " + WiFi.localIP().toString());
+  addLog("Panel hazir");
 }
 
+// =========================
 // LOOP
-void loop(){
+// =========================
+void loop() {
   ArduinoOTA.handle();
   server.handleClient();
 
-  bool trig=digitalRead(SERVO_TRIGGER);
+  static bool lastTriggerActive = false;
+  static bool firstRead = true;
 
-  if(trig){
-    servoRight.write(rightAngle);
-    servoLeft.write(leftAngle);
-  }else{
-    servoRight.write(0);
-    servoLeft.write(0);
+  int triggerValue = analogRead(SERVO_TRIGGER_PIN);
+  bool triggerActive = (triggerValue >= SERVO_TRIGGER_THRESHOLD);
+
+  if (firstRead) {
+    lastTriggerActive = triggerActive;
+    firstRead = false;
+
+    if (triggerActive) {
+      openMirrors();
+    } else {
+      closeMirrors();
+    }
   }
-}    Serial.println("Sabit IP Hatası!");
+
+  if (triggerActive != lastTriggerActive) {
+    lastTriggerActive = triggerActive;
+
+    if (triggerActive) {
+      addLog("Servo tetik aktif (A0)");
+      openMirrors();
+    } else {
+      addLog("Servo tetik pasif (A0)");
+      closeMirrors();
+    }
   }
-
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  
-  Serial.println("\nBaglandi!");
-
-  // --- OTA AYARI ---
-  // Tarayıcıdan 192.168.4.50/update adresine girerek güncelleme yapabilirsin
-  httpUpdater.setup(&server); 
-
-  server.on("/ac", handleAC);
-  server.on("/kapat", handleKapat);
-  server.on("/", []() {
-    server.send(200, "text/html", "<h3>NodeMCU Isitici Sistemi</h3><p>OTA icin: <a href='/update'>/update</a></p>");
-  });
-
-  server.begin();
-}
-
-void loop() {
-  server.handleClient();
-}
+} 
